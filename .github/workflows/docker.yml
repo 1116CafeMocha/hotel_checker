@@ -23,4 +23,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ toLower(github.repository_owner) }}/hotel_checker:latest
+          tags: ghcr.io/${{ lowercase(github.repository_owner) }}/hotel_checker:latest
