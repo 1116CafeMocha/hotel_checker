@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+prod.env
+nami_state.txt

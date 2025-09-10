@@ -1,0 +1,11 @@
+# venv & 캐시
+venv/
+__pycache__/
+*.pyc
+
+# 로컬/서버 비밀
+.env
+prod.env
+
+# 런타임 생성물
+nami_state.txt
