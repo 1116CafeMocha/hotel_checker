@@ -2,25 +2,29 @@
 # 특정 날짜(체크인 기준) 예약 가능 시 Gmail로 알림!
 # 현재 목표 : 10월 25일 체크인
 
-import sys, os, asyncio, re, random, time, ssl, smtplib
+import sys, os, asyncio, re, random, time, ssl, smtplib, datetime, traceback
 from email.mime.text import MIMEText
 from email.header import Header
 from pathlib import Path
 from playwright.async_api import async_playwright
 from dotenv import load_dotenv
-load_dotenv()  # .env 파일 자동 로드
+# .env 파일 자동 로드
+load_dotenv()
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
     pass
 
-# ──[환경변수]────────────────────────────────────────────────────────────
+def log(msg):
+    print(f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+# 환경변수
 SMTP_USER = os.environ["SMTP_USER"]                  # 발신 Gmail
 SMTP_APP_PASSWORD = os.environ["SMTP_APP_PASSWORD"]  # 앱 비밀번호(16자, 공백 제거)
 EMAIL_TO = os.environ["EMAIL_TO"]                    # 수신 주소
 
-# 감시 날짜(기본값: 2025-10-25 체크인) — 필요하면 컨테이너 실행 시 오버라이드 가능
+# 감시 날짜(기본값: 2025-10-25 체크인)
 YEAR = int(os.getenv("YEAR", "2025"))
 MONTH = int(os.getenv("MONTH", "10"))
 CHECKIN_DAY = int(os.getenv("CHECKIN_DAY", "25"))
@@ -29,10 +33,10 @@ CHECKIN_DAY = int(os.getenv("CHECKIN_DAY", "25"))
 MIN_INTERVAL_SEC = int(os.getenv("MIN_INTERVAL_SEC", "300"))   # 5분
 MAX_INTERVAL_SEC = int(os.getenv("MAX_INTERVAL_SEC", "600"))   # 10분
 
-PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "60000"))
+PAGE_TIMEOUT_MS = int(os.getenv("PAGE_TIMEOUT_MS", "180000"))
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("1", "true", "yes")
 
-# ──[대상 객실]────────────────────────────────────────────────────────────
+# 대상 객실
 ROOMS = {
     "아네모네": 34,
     "베고니아": 60,
@@ -40,13 +44,11 @@ ROOMS = {
     "다알리아": 62,
     "에델바이스": 63,
 }
-STATE_FILE = Path("nami_state.txt")  # 마지막 발송 메시지 저장(중복알림 방지)
+STATE_FILE = Path("nami_state.txt")
 
-# ──────────────────────────────────────────────────────────────────────────
 PRICE_RE = re.compile(r"(?:\d{1,3}(?:,\d{3})+|\d{4,})\s*원?")
 
 def send_email(subject: str, body: str):
-    """Gmail SMTP로 메일 발송"""
     msg = MIMEText(body, _charset="utf-8")
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = SMTP_USER
@@ -68,7 +70,6 @@ def looks_like_price(text: str) -> bool:
     return bool(PRICE_RE.search(text))
 
 async def get_day_text(page, day: int) -> str:
-    """날짜 숫자 주변 컨테이너 단위로 텍스트를 가져와 '예약불가' 또는 '가격' 문구를 함께 읽어옴."""
     candidates = [
         f"//*[normalize-space(text())='{day}']",
         f"//button[normalize-space(.)='{day}']",
@@ -89,11 +90,14 @@ async def get_day_text(page, day: int) -> str:
     return ""
 
 async def check_one_room(p, ho_idx: int, headless=True) -> bool:
-    """한 객실의 지정 월 달력에서 CHECKIN_DAY 가격 표기가 보이면 '가능'."""
     url = f"https://naminara.net/main/page/hotel_detail.php?ho_idx={ho_idx}&syear={YEAR}&smonth={MONTH}"
     browser = await p.chromium.launch(
         headless=headless,
-        args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
     )
     ctx = await browser.new_context(
         user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -130,44 +134,54 @@ async def main_loop():
     last_msg = read_state()
     async with async_playwright() as p:
         while True:
-            available = []
-            for name, idx in ROOMS.items():
-                try:
-                    ok = await check_one_room(p, idx, headless=HEADLESS)
-                except Exception as e:
-                    ok = False
-                    print(f"[에러] {name}({idx}): {e}")
-                print(f"- {name}: {'가능' if ok else '불가'}")
-                if ok:
-                    available.append(name)
+            try:
+                available = []
+                for name, idx in ROOMS.items():
+                    try:
+                        ok = await check_one_room(p, idx, headless=HEADLESS)
+                    except Exception as e:
+                        ok = False
+                        log(f"[에러] {name}({idx}): {e}")
+                    log(f"- {name}: {'가능' if ok else '불가'}")
+                    if ok:
+                        available.append(name)
 
-            if available:
-                lines = [
-                    f"[남이섬 호텔정관루] {YEAR}-{MONTH:02d}-{CHECKIN_DAY} 체크인 기준 예약 가능 감지!",
-                    f"객실: {', '.join(available)}",
-                    "",
-                ]
-                for r in available:
-                    url = f"https://naminara.net/main/page/hotel_detail.php?ho_idx={ROOMS[r]}&syear={YEAR}&smonth={MONTH}"
-                    lines.append(f"- {r}: {url}")
-                msg = "\n".join(lines)
+                if available:
+                    lines = [
+                        f"[남이섬 호텔정관루] {YEAR}-{MONTH:02d}-{CHECKIN_DAY} 체크인 기준 예약 가능 감지!",
+                        f"객실: {', '.join(available)}",
+                        "",
+                    ]
+                    for r in available:
+                        url = f"https://naminara.net/main/page/hotel_detail.php?ho_idx={ROOMS[r]}&syear={YEAR}&smonth={MONTH}"
+                        lines.append(f"- {r}: {url}")
+                    msg = "\n".join(lines)
 
-                if msg != last_msg:
-                    send_email("호텔정관루 예약 가능!", msg)
-                    write_state(msg)
-                    last_msg = msg
-                    print("[메일 발송] 가능 객실 발견 → 알림 전송")
+                    if msg != last_msg:
+                        send_email("호텔정관루 예약 가능!", msg)
+                        write_state(msg)
+                        last_msg = msg
+                        log("[메일 발송] 가능 객실 발견 → 알림 전송")
+                    else:
+                        log("[스킵] 동일 내용은 이미 알림 발송됨")
                 else:
-                    print("[스킵] 동일 내용은 이미 알림 발송됨")
-            else:
-                print("현재는 모든 대상 방이 불가")
+                    log("현재는 모든 대상 방이 불가")
+
+            except Exception:
+                log("[치명] 라운드 처리 중 예외 발생\n" + traceback.format_exc())
+                time.sleep(10)
 
             sleep_sec = random.randint(MIN_INTERVAL_SEC, MAX_INTERVAL_SEC)
-            print(f"다음 확인까지 {sleep_sec}초 대기...\n")
+            log(f"다음 확인까지 {sleep_sec}초 대기...\n")
             time.sleep(sleep_sec)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        print("중지합니다.")
+    while True:
+        try:
+            asyncio.run(main_loop())
+        except KeyboardInterrupt:
+            log("중지합니다.")
+            break
+        except Exception:
+            log("[치명] asyncio 루프 붕괴\n" + traceback.format_exc())
+            time.sleep(5)
